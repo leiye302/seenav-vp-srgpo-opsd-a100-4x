@@ -1,0 +1,22 @@
+{
+  "paper": "https://arxiv.org/pdf/2512.02631v2",
+  "repository": "https://github.com/WzcTHU/SeeNav-Agent.git",
+  "commit": "7ed6a59052701951bdb2c7d51dd6d9103219cf3e",
+  "train_launcher": "verl-agent/examples/srgpo_trainer/run_ebnav.sh",
+  "base_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "released_model": "wangzc9865/SeeNav-Agent",
+  "navigation_data": "verl-agent/agent_system/environments/env_package/ebnav/dataset",
+  "evaluation_tasks": 60,
+  "evaluation_task_sha256": "6b575621a6b15e90e1040dd86d661a5e1ee70134f42fd7f3d61706347449c55a",
+  "sdar": {
+    "repository": "https://github.com/ZJU-REAL/SDAR",
+    "commit": "29dcb12a55d8fc17ba6ae03fd0a69048f43051f3",
+    "loss_sha256": "329ee3a73e05d3ab9817dd59d69394dd6ba3df85ca9abe9ddebc0e2c2682ad68",
+    "coefficient": 0.01,
+    "gate_beta": 5.0
+  },
+  "patched_files": {
+    "verl-agent/verl/trainer/ppo/ray_trainer.py": "1a2634dacb17e55f48f084b7e41bad35c942a17c7d7ba91295c0aa700b88e7ba",
+    "verl-agent/verl/workers/actor/dp_actor.py": "dae3e2f20061da29f873a54a5f12a7902c8545275996a34d652fc7b8116978c6"
+  }
+}

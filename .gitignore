@@ -1,0 +1,12 @@
+.deps/
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+runs/
+.env
+.env.*
+*.log
+*.safetensors
+*.parquet
+wandb/

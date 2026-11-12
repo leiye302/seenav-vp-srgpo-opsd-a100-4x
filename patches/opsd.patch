@@ -1,0 +1,35 @@
+diff --git a/verl-agent/verl/trainer/ppo/ray_trainer.py b/verl-agent/verl/trainer/ppo/ray_trainer.py
+--- a/verl-agent/verl/trainer/ppo/ray_trainer.py
++++ b/verl-agent/verl/trainer/ppo/ray_trainer.py
+@@ -1354,5 +1354,9 @@
+                     if self.config.trainer.critic_warmup <= self.global_steps:
+                         # update actor
+                         # print('######################### update actor #########################')
++                        if self.config.actor_rollout_ref.actor.get("use_sdar_loss", False):
++                            from seenav_opsd.teacher import attach_teacher_scores
++                            with _timer("teacher_forward", timing_raw):
++                                metrics.update(attach_teacher_scores(self, batch))
+                         with _timer("update_actor", timing_raw):
+                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+diff --git a/verl-agent/verl/workers/actor/dp_actor.py b/verl-agent/verl/workers/actor/dp_actor.py
+--- a/verl-agent/verl/workers/actor/dp_actor.py
++++ b/verl-agent/verl/workers/actor/dp_actor.py
+@@ -323,5 +323,8 @@
+         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
++        use_sdar_loss = self.config.get("use_sdar_loss", False)
++        if use_sdar_loss:
++            select_keys.append("teacher_log_probs")
+         if multi_turn:
+             select_keys.append("loss_mask")
+         if self.config.use_kl_loss:
+             select_keys.append("ref_log_prob")
+@@ -419,3 +422,9 @@
++                    if use_sdar_loss:
++                        from seenav_opsd.loss import add_sdar_loss
++                        policy_loss, sdar_metrics = add_sdar_loss(
++                            policy_loss, log_prob, data["teacher_log_probs"], response_mask, self.config)
++                        append_to_dict(metrics, sdar_metrics)
++
+                     if self.config.use_dynamic_bsz:
+                         # relative to the dynamic bsz
+                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
