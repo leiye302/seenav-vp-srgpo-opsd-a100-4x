@@ -1,6 +1,6 @@
 # SeeNav-Agent / VP + SRGPO + OPSD / 4×A100 80GB
 
-在作者公开的 **EmbodiedBench-Navigation / VP + SRGPO** 训练上，仅接入 Teacher-only OPSD。使用
+这是与 RETHINK 方法对齐输出和终评的 **EmbodiedBench-Navigation / VP + SRGPO + OPSD** 对照。使用
 [SeeNav-Agent 论文 v2](https://arxiv.org/pdf/2512.02631v2) 和
 [作者代码 7ed6a59](https://github.com/WzcTHU/SeeNav-Agent/tree/7ed6a59052701951bdb2c7d51dd6d9103219cf3e)。
 这是对照实验的复现仓库，不是作者发布，也不包含权重、数据副本或训练结果。
@@ -8,18 +8,24 @@
 ## 改动范围
 
 保留[作者 SRGPO 启动脚本](https://github.com/WzcTHU/SeeNav-Agent/blob/7ed6a59052701951bdb2c7d51dd6d9103219cf3e/verl-agent/examples/srgpo_trainer/run_ebnav.sh)。
-除四卡 `trainer.n_gpus_per_node: 8 → 4` 和隔离产物路径之外，只加入 OPSD 的评分及损失接线。
-干净的官方 checkout 保持不变；`fetch` 把 [13 行补丁](patches/opsd.patch) 应用到另一个 checkout，
-仅触及 `ray_trainer.py` 和 `dp_actor.py`。原模型、环境、数据、VP、动作、原生 SRGPO 优势、
-原有 reference KL、优化器、batch、验证和保存设置均不变；没有切换 LoRA 或新增 offload。
+在单独的运行副本上应用[原 OPSD 补丁](patches/opsd.patch)和[标签动作补丁](patches/tags-rollout.patch)。
+Teacher 的静态技能也要求 `<action>`，不再要求 JSON；原 SRGPO 优势、SDAR 损失与门控不变。
+沿用作者的训练环境、数据准备、优化器、batch、reference KL、保存及训练内验证频率。
 
-| 项目 | 沿用作者公开的训练入口 |
+三个对照共用与 [ours](https://github.com/leiye302/seenav-vp-srgpo-rethink-a100-4x/tree/c95d3f5016ef3feefe4d3243ecc2a8f9afcd2b9c)
+相同的 Qwen2.5-VL-3B-Instruct 基模版本 `6628554`、原生双视图标签提示和严格解析。
+Actor 每步生成非空 `<think>…</think><action>0–7 中一个编号</action>`，不要求 JSON；
+不合法的回复不执行动作。对照直接从基模训练，不使用 Route-SFT、RETHINK 或局部 hint。
+这里的 JSON 日志和评测产物只是落盘格式，与 Actor 输出无关。
+
+| 项目 | 训练口径 |
 | --- | --- |
 | 模型与训练方式 | Qwen/Qwen2.5-VL-3B-Instruct；VP + SRGPO，FSDP，vLLM TP=2 |
 | 一批的 rollout | 8 个任务，每任务 4 条轨迹（32 条），每条最多 20 步 |
 | SRGPO | 跨 batch 内的步骤随机分组，每组 16；mean/std 归一化，步骤优势权重 0.5 |
 | 优化 | LR 1e-6；全局 PPO mini batch 8，单卡 micro batch 1；KL 0.01 |
-| 验证、保存 | 8 任务训练内验证，每 5 步；150 epochs、每 150 步保存 |
+| 训练、验证、保存 | 150 次更新；原生 8 题训练内验证每 5 步；第 150 步保存 |
+| 固定终评 | 同 ours：EB-Nav `base.json` 全部 60 题，seed 0，每题最多 20 次决策 |
 | 新增 OPSD | SDAR sampled-token loss，系数 0.01，gate beta 5，原响应 mask 上 token-mean |
 
 论文原配是 8 张 H20 96GB。4 卡时，上游 `adjust_batch` 会按 4 卡而非 8 卡做原生整除补齐，
@@ -73,7 +79,7 @@ python reproduce.py fetch
   cd .deps/SeeNav-Agent/verl-agent
   USE_MEGATRON=0 USE_SGLANG=0 bash scripts/install_vllm_sglang_mcore.sh
 )
-python -m pip install -r .deps/SeeNav-Agent/verl-agent/requirements.txt ai2thor==5.0.0 gym==0.26.2
+python -m pip install -r .deps/SeeNav-Agent/verl-agent/requirements.txt ai2thor==5.0.0 gym==0.26.2 filelock
 python -m pip check
 python -c 'import torch, transformers, vllm, flash_attn, ray, ai2thor; print(torch.__version__, torch.version.cuda)'
 ```
@@ -89,6 +95,7 @@ SeeNav 依赖清单指定 Transformers 4.51.1。AI2-THOR 5.0.0 和 Gym 0.26.2 �
 ```bash
 python reproduce.py check
 python reproduce.py plan
+python final_eval.py plan --format tags
 python -m unittest discover -s tests -v
 
 # 保留原版 console + W&B；无线上账号时可由用户选择离线记录：
@@ -98,15 +105,31 @@ python reproduce.py train --gpus 0,1,2,3 --output runs/ebnav-vp-srgpo-opsd-4gpu
 ```
 
 调度器已设 `CUDA_VISIBLE_DEVICES` 为 4 张卡时可省略 `--gpus`。输出目录须不存在且不含空格。
-`plan` 分别显示纯一行四卡 diff 和加入 OPSD 开关后的实际入口。训练沿用原预处理器：
+`plan` 会分别显示纯一行四卡 diff 和实际执行的标签入口。训练沿用原预处理器：
 Geometry3K 只用于构造 8/8 行视觉加载器输入；**导航的场景、目标和训练轨迹来自 AI2-THOR 环境**，
 不是在数学数据上训练导航。没有重新划分或替换上游的任务。
 
 在另一个终端运行 `tail -f runs/ebnav-vp-srgpo-opsd-4gpu/train.log` 查看训练。运行目录保留四卡
 launcher、实际 launcher、源码与补丁、技能和损失的版本/哈希记录、`train.log`、原生 `metrics/`
 和 `checkpoints/`。
-没有自动删除 checkpoint 或自动发布数据；退出码为 0 仅表示原生进程退出成功，正式验收仍需确认
-末步 metrics、FSDP model/optimizer/extra 各 4 个 shard、dataloader 状态及 HF 导出文件。
+训练正常退出后，验收 150 步的 metrics、各 rank 的 FSDP 状态、dataloader 和 HF 导出，
+写 `training_complete.json`，再用第一张已分配的卡启动终评。训练与评测使用同一 tag 协议。
+不会自动删除 checkpoint 或上传数据。
+
+## 固定 60 题终评
+
+使用与 [ours](https://github.com/leiye302/seenav-vp-srgpo-rethink-a100-4x/blob/c95d3f5016ef3feefe4d3243ecc2a8f9afcd2b9c/METHOD.md#固定-60-题终评)
+相同的终评脚本：锁定任务及初始位姿，不随机抽题；最多 20 次决策，水平距离不超过 1 m 判成功。
+seed 0、temperature 0.4、1024-token 回复上限，终评单独使用 30° 俯仰。训练环境仍保留原来的 90°。
+终评不用 Teacher、Analyzer 或 API。成功率是成功任务数除以 60，写入 `final_eval/summary.json`；
+每题单独落盘，完成后写 `complete.json`。若终评中断，按实际分配的卡号续测：
+
+```bash
+python reproduce.py final-eval --gpus 0 --output runs/ebnav-vp-srgpo-opsd-4gpu
+```
+
+旧 JSON 训练不能作为新版标签训练续接。已有旧模型可独立评测，但不得当成新的标签对照训练结果。
+仓库不改变已启动的旧进程；部署新版先更新仓库并执行 `python reproduce.py fetch`，新跑请用新目录。
 
 ## 上游原样保留的限制
 
@@ -116,7 +139,8 @@ launcher、实际 launcher、源码与补丁、技能和损失的版本/哈希�
   论文正文与附录提示词也存在拼接顺序描述差异。实际双图代码按 `BEV | FV`。这些均不改。
 - 原训练内验证是从 base 任务中取 8 个，不是独立评测的固定 60 任务成功率。作者独立评测
   `SeeNav/testEBNav.py` 引用了没有随这一 commit 发布的 `DualViewGrounding`、`ActionMarker`
-  顶层模块。保留原版，不补写或替换评测逻辑。作者发布的 EB-Nav 权重见
+  顶层模块；我们的共用终评通过公开训练包的 EB-Nav 环境执行，不宣称逐字复现该脚本或论文多种子分数。
+  作者发布的 EB-Nav 权重见
   [官方 checkpoint](https://huggingface.co/wangzc9865/SeeNav-Agent)。
 
 CPU 检查覆盖原版参数对照、补丁边界、Qwen 多模态位置、Teacher token/图像/掩码一致性，

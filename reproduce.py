@@ -75,13 +75,14 @@ def text_sha(path):
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
-def verify_opsd_source(source):
+def verify_opsd_source(source, *, extra_files=None):
     if not source.is_dir() or git(source, "rev-parse", "HEAD") != LOCK["commit"]:
         raise ValueError("Run python reproduce.py fetch to prepare the separate OPSD checkout.")
     changed = set(git(source, "diff", "--name-only", "HEAD").splitlines())
-    if changed != set(LOCK["patched_files"]):
-        raise ValueError("The OPSD checkout must differ in only the two locked hook files.")
-    for name, expected in LOCK["patched_files"].items():
+    pinned = {**LOCK["patched_files"], **(extra_files or {})}
+    if changed != set(pinned):
+        raise ValueError("The OPSD checkout must differ in only the locked hook files.")
+    for name, expected in pinned.items():
         if text_sha(source / name) != expected:
             raise ValueError(f"OPSD hook differs from its lock: {name}")
     if text_sha(ROOT / "seenav_opsd" / "sdar_utils.py") != LOCK["sdar"]["loss_sha256"].lower():
@@ -116,7 +117,7 @@ def replace_one(text, old, new):
 
 
 def four_gpu_launcher(native):
-    """The single training recipe difference."""
+    """Only the hardware adaptation; see run_alignment for experiment changes."""
     return replace_one(native, OLD_GPU, NEW_GPU)
 
 
@@ -191,9 +192,11 @@ def package_versions():
 
 
 def launch(source, out, gpus):
+    import run_alignment as aligned
+
     if not sys.platform.startswith("linux"):
         raise ValueError("Native SeeNav training requires the documented Linux/CUDA environment.")
-    runtime = verify_opsd_source(OPSD_SOURCE)
+    runtime = aligned.verify_runtime(aligned.RUNTIME)
     if out.exists() or out.is_relative_to(source) or out.is_relative_to(runtime):
         raise ValueError("Choose a new output directory outside either source checkout.")
     # The upstream launcher passes paths through Hydra, whose CLI has special
@@ -211,22 +214,23 @@ def launch(source, out, gpus):
         "SEENAV_RUN_DIR": str(out),
     }
     devices = hardware_check(env)
+    env["SEENAV_BASE_MODEL"] = str(aligned.pinned_model())
     native_path = source / LOCK["train_launcher"]
     native = native_path.read_text(encoding="utf-8")
     card_only = four_gpu_launcher(native)
-    runner = enable_opsd(isolated_paths(card_only))
+    runner = aligned.effective_launcher(native)
     out.mkdir(parents=True, exist_ok=False)
     (out / "data" / "visual").mkdir(parents=True)
     (out / "metrics").mkdir()
     write_new(out / "official-4gpu.sh", card_only)
     write_new(out / "launch.sh", runner)
     write_new(out / "binding.json", json.dumps({
+        **aligned.protocol_binding(),
         "official_commit": LOCK["commit"],
         "official_launcher_sha256": sha(native_path),
         "four_gpu_launcher_sha256": sha(out / "official-4gpu.sh"),
         "effective_launcher_sha256": sha(out / "launch.sh"),
         "card_override": {"trainer.n_gpus_per_node": GPU_COUNT},
-        "method": "VP + SRGPO + OPSD",
         "sdar": LOCK["sdar"],
         "opsd_patch_sha256": text_sha(OPSD_PATCH),
         "opsd_patched_files": LOCK["patched_files"],
@@ -245,45 +249,56 @@ def launch(source, out, gpus):
                                 stdout=log, stderr=subprocess.STDOUT)
     write_new(out / "exit.json", json.dumps({"returncode": result.returncode}) + "\n")
     verify_source(source)
-    verify_opsd_source(runtime)
+    aligned.verify_runtime(runtime)
     if result.returncode:
         raise SystemExit(f"Official launcher exited with code {result.returncode}; inspect {out / 'train.log'}")
-    print(f"Native launcher exited successfully; see {out / 'metrics'} and {out / 'checkpoints'}.")
+    aligned.finish(out, source, ids[0])
 
 
 def main():
+    import run_alignment as aligned
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("fetch", "check", "plan", "train"))
+    parser.add_argument("command", choices=("fetch", "check", "plan", "train", "final-eval"))
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE,
                         help="Optional already-cloned, clean pinned public source.")
     parser.add_argument("--direct", action="store_true", help="Use a direct HTTPS GitHub fetch (fetch only).")
-    parser.add_argument("--gpus", help="Four allocated GPU IDs; default: scheduler's CUDA_VISIBLE_DEVICES.")
-    parser.add_argument("--output", type=Path, help="New experiment output directory for train.")
+    parser.add_argument("--gpus", help="Four allocated GPUs for train; one for final-eval.")
+    parser.add_argument("--output", type=Path, help="New train directory or existing directory for final-eval.")
     args = parser.parse_args()
     source = args.source.resolve()
     if args.command == "fetch":
         fetch_source(source, args.direct)
-        fetch_opsd_source(source)
-        print(f"Verified SeeNav-Agent {LOCK['commit']} and the isolated two-file OPSD overlay.")
+        aligned.fetch_runtime(source)
+        print(f"Verified SeeNav-Agent {LOCK['commit']} and the isolated tag runtime.")
         return
     verify_source(source)
-    verify_opsd_source(OPSD_SOURCE)
+    if args.command == "final-eval":
+        if args.output is None or not args.output.is_dir():
+            parser.error("final-eval requires an existing --output run directory.")
+        aligned.finish(args.output.resolve(), source, aligned.evaluation_device(
+            args.gpus, os.environ.get("CUDA_VISIBLE_DEVICES"),
+        ))
+        return
+    aligned.verify_runtime(aligned.RUNTIME)
     native = (source / LOCK["train_launcher"]).read_text(encoding="utf-8")
     if args.command == "check":
-        print(json.dumps({"official_commit": LOCK["commit"], "gpu_count": GPU_COUNT,
+        print(json.dumps({**aligned.protocol_binding(), "official_commit": LOCK["commit"], "gpu_count": GPU_COUNT,
             "base_eval_tasks": LOCK["evaluation_tasks"], "base_eval_sha256": LOCK["evaluation_task_sha256"],
-            "method": "VP + SRGPO + OPSD", "sdar": LOCK["sdar"],
+            "sdar": LOCK["sdar"],
             "check": "source/config only; no simulator or training run"}, indent=2))
     elif args.command == "plan":
         four_gpu = four_gpu_launcher(native)
         print("".join(difflib.unified_diff(native.splitlines(keepends=True), four_gpu.splitlines(keepends=True),
                    fromfile="official", tofile="four_gpu")), end="")
-        print("\n# Executed launcher (separate OPSD checkout; paths supplied by SEENAV_RUN_DIR)")
-        print(enable_opsd(isolated_paths(four_gpu)), end="")
+        print("\n# Executed launcher (matched tag protocol and pinned base)")
+        print(aligned.effective_launcher(native), end="")
     else:
         output = args.output or ROOT / "runs" / datetime.now(timezone.utc).strftime("seenav-%Y%m%dT%H%M%SZ")
         launch(source, output.resolve(), args.gpus)
 
 
 if __name__ == "__main__":
+    # Runtime/evaluator helpers import this configuration by its module name.
+    sys.modules["reproduce"] = sys.modules[__name__]
     main()

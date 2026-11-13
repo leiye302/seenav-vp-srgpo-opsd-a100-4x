@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reproduce
+import run_alignment
 
 
 class RecipeTest(unittest.TestCase):
@@ -52,7 +53,7 @@ class RecipeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reproduce.four_gpu_launcher(bad)
 
-    def test_shell_passes_only_card_path_and_opsd_differences_to_native_modules(self):
+    def test_shell_passes_only_card_path_model_tag_and_opsd_differences_to_native_modules(self):
         bash = os.environ.get("SEENAV_TEST_BASH") or shutil.which("bash")
         if not bash:
             self.skipTest("Bash is not installed")
@@ -61,15 +62,15 @@ class RecipeTest(unittest.TestCase):
             # Capture Bash's actual argv without importing or running the GPU stack.
             stub = "python3() { printf '%s\\0' \"$@\" __CALL_END__; }\n"
             out = subprocess.check_output([bash, "--noprofile", "--norc", "-e", "-c", stub + script],
-                env={**os.environ, "SEENAV_RUN_DIR": "/tmp/seenav-fixture"},
+                env={**os.environ, "SEENAV_RUN_DIR": "/tmp/seenav-fixture",
+                     "SEENAV_BASE_MODEL": "/tmp/pinned-qwen"},
                 stderr=subprocess.PIPE)
             calls = [call.split("\0")[:-1] for call in out.decode().split("__CALL_END__\0")[:-1]]
             self.assertEqual(len(calls), 2)
             return calls
 
         old_data, old_train = capture(self.native)
-        new_data, new_train = capture(reproduce.enable_opsd(reproduce.isolated_paths(
-            reproduce.four_gpu_launcher(self.native))))
+        new_data, new_train = capture(run_alignment.effective_launcher(self.native))
         self.assertEqual(new_data, old_data + ["--local_dir", "/tmp/seenav-fixture/data"])
         self.assertEqual(old_train[:2], new_train[:2])
         self.assertEqual(new_train[:2], ["-m", "verl.trainer.main_ppo"])
@@ -77,6 +78,8 @@ class RecipeTest(unittest.TestCase):
         new_args = dict(arg.split("=", 1) for arg in new_train[2:])
         old_args.update({
             "trainer.n_gpus_per_node": "4",
+            "actor_rollout_ref.actor.output_format": "tags",
+            "actor_rollout_ref.model.path": "/tmp/pinned-qwen",
             "data.train_files": "/tmp/seenav-fixture/data/visual/train.parquet",
             "data.val_files": "/tmp/seenav-fixture/data/visual/test.parquet",
             "data.metrics_save_dir": "/tmp/seenav-fixture/metrics",
@@ -86,6 +89,7 @@ class RecipeTest(unittest.TestCase):
             "++actor_rollout_ref.actor.sdar_gate_beta": "5.0",
         })
         self.assertEqual(old_args, new_args)
+        self.assertNotIn("++actor_rollout_ref.actor.rethink_local_hints", new_args)
 
     def test_respect_device_allocation(self):
         self.assertEqual(reproduce.gpu_ids(None, "2,3,6,7"), ["2", "3", "6", "7"])

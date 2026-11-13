@@ -12,6 +12,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reproduce
+import run_alignment
 from seenav_opsd.teacher import attach_teacher_scores, pack_teacher_tensors
 
 
@@ -29,7 +30,7 @@ class OpsdTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = reproduce.verify_source(Path(os.environ.get("SEENAV_TEST_SOURCE", reproduce.DEFAULT_SOURCE)))
-        cls.runtime = reproduce.verify_opsd_source(reproduce.OPSD_SOURCE)
+        cls.runtime = run_alignment.verify_runtime(run_alignment.RUNTIME)
         cls.native = cls.source / "verl-agent"
 
     def load_function(self, relative, name, **symbols):
@@ -101,6 +102,8 @@ class OpsdTest(unittest.TestCase):
         def encode(text, add_special_tokens):
             self.assertFalse(add_special_tokens)
             self.assertTrue(text.startswith("[Privileged Skill Information]\n"))
+            self.assertIn("return a single available action inside the native <action> tag.", text)
+            self.assertNotIn("JSON", text)
             return [31, 32, 33]
 
         trainer = SimpleNamespace(

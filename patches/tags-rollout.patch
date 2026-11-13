@@ -1,0 +1,15 @@
+diff --git a/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py b/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py
+--- a/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py
++++ b/verl-agent/agent_system/multi_turn_rollout/rollout_loop.py
+@@ -358 +358,10 @@
+-            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
++            actor_config = self.config.actor_rollout_ref.actor
++            tags = actor_config.output_format == "tags"
++            if tags:
++                from seenav_rethink.rollout import execution_texts
++
++                text_actions = execution_texts(
++                    self.tokenizer, batch.batch["responses"], batch.batch["attention_mask"],
++                )
++            else:
++                text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
